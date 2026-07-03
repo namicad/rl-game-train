@@ -1,5 +1,3 @@
-#include "ai/adapter.h"
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>

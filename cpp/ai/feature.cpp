@@ -1,54 +1,27 @@
-#include "simulator.h"
+#include "feature.h"
 
-void Simulator::apply(GameState& s, const Action& a)
+std::vector<float> encode(const GameState& s,
+                          const Candidate& c)
 {
-    switch (a.type)
-    {
-        case ActionType::BUILD:
-            if (s.gold >= 10)
-            {
-                s.gold -= 10;
-                s.city_count += 1;
-            }
-            break;
+    std::vector<float> v;
 
-        case ActionType::TRAIN:
-            if (s.gold >= 5)
-            {
-                s.gold -= 5;
-                s.population += 1;
-            }
-            break;
+    v.push_back(s.turn);
+    v.push_back(s.resource);
+    v.push_back(s.army);
+    v.push_back(s.map_control);
 
-        case ActionType::UPGRADE:
-            if (s.gold >= 20)
-            {
-                s.gold -= 20;
-                s.population += 2;
-            }
-            break;
+    v.push_back(c.attack.aggression);
+    v.push_back(c.attack.grouping);
+    v.push_back(c.attack.target_bias);
+    v.push_back(c.attack.risk);
 
-        default:
-            break;
-    }
-}
+    v.push_back(c.economy.expand);
+    v.push_back(c.economy.greed);
+    v.push_back(c.economy.tech);
 
-void Simulator::enemy_step(GameState& s)
-{
-    // 단순 baseline enemy
-    s.enemy_city_count += (s.turn % 5 == 0);
-    s.population += 1;
-}
+    v.push_back(c.defense.hold);
+    v.push_back(c.defense.retreat);
+    v.push_back(c.defense.reinforce);
 
-void Simulator::resolve(GameState& s)
-{
-    s.turn++;
-
-    s.gold += s.city_count * 2;
-
-    if (s.city_count > s.enemy_city_count + 3)
-        s.win = true;
-
-    if (s.enemy_city_count > s.city_count + 3)
-        s.lose = true;
+    return v;
 }

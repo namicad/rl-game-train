@@ -1,18 +1,8 @@
 #pragma once
+#include "../engine/game_state.h"
+#include "../strategy/candidate.h"
 
-enum class ActionType
-{
-    MOVE,
-    ATTACK,
-    BUILD,
-    TRAIN,
-    UPGRADE,
-    END
-};
-
-struct Action
-{
-    ActionType type = ActionType::END;
-    int unit_id = -1;
-    int target = -1;
-};
+namespace AI {
+    Candidate select(const GameState& state,
+                     const vector<Candidate>& candidates);
+}

@@ -1,18 +1,14 @@
-#pragma once
+#include "model_loader.h"
 
-enum class ActionType
-{
-    MOVE,
-    ATTACK,
-    BUILD,
-    TRAIN,
-    UPGRADE,
-    END
-};
+Model loadModel(const char* path) {
+    Model m;
+    // placeholder load
+    m.weights = {1.0f};
+    return m;
+}
 
-struct Action
-{
-    ActionType type = ActionType::END;
-    int unit_id = -1;
-    int target = -1;
-};
+float predict(const Model& m, const std::vector<float>& input) {
+    float s = 0;
+    for (auto v : input) s += v;
+    return s;
+}
