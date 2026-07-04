@@ -1,0 +1,9 @@
+{
+  "epochs": 200,
+  "final_loss": 6.773576790141539,
+  "eval_match_rate": 0.5333333333333333,
+  "weights_file": "C:\\Users\\namicad\\Desktop\\vscode\\rl-game-train\\models\\weights.txt",
+  "training_log": "C:\\Users\\namicad\\Desktop\\vscode\\rl-game-train\\models\\training_log.csv",
+  "status": "completed",
+  "epochs_completed": 200
+}

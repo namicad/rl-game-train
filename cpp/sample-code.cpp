@@ -2,12 +2,20 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+struct Model {
+  std::vector<float> weights;
+  std::vector<float> bias;
+  int input_dim = 0;
+  int action_dim = 0;
+};
 
 constexpr int MAX_TURN = 200;         // maximum turn (days)
 constexpr int START_GOLD = 500;       // initial gold
@@ -220,15 +228,25 @@ static void parse_init(GameMap &M, GameState &S) {
   S.gold = START_GOLD;
   Side opp = opposite(M.my_side);
   for (int sfx = 1; sfx <= START_WARRIORS; ++sfx) {
-    S.warriors.push_back(Warrior{.id = WarriorId{M.my_side, sfx},
-                                 .region = M.my_hq,
-                                 .hp = HQ_LEVELS[1].warrior_hp});
-    S.warriors.push_back(Warrior{.id = WarriorId{opp, sfx},
-                                 .region = M.opp_hq,
-                                 .hp = HQ_LEVELS[1].warrior_hp});
+    Warrior my_warrior;
+    my_warrior.id = WarriorId{M.my_side, sfx};
+    my_warrior.region = M.my_hq;
+    my_warrior.hp = HQ_LEVELS[1].warrior_hp;
+    S.warriors.push_back(my_warrior);
+
+    Warrior opp_warrior;
+    opp_warrior.id = WarriorId{opp, sfx};
+    opp_warrior.region = M.opp_hq;
+    opp_warrior.hp = HQ_LEVELS[1].warrior_hp;
+    S.warriors.push_back(opp_warrior);
   }
-  S.buildings.push_back(Building{hq_of(M, Side::LEFT), Side::LEFT, BType::HQ, 1,
-                                 HQ_LEVELS[1].hp});
+  Building left_hq;
+  left_hq.region = hq_of(M, Side::LEFT);
+  left_hq.side = Side::LEFT;
+  left_hq.type = BType::HQ;
+  left_hq.level = 1;
+  left_hq.hp = HQ_LEVELS[1].hp;
+  S.buildings.push_back(left_hq);
   S.buildings.push_back(Building{hq_of(M, Side::RIGHT), Side::RIGHT, BType::HQ,
                                  1, HQ_LEVELS[1].hp});
 
@@ -278,7 +296,9 @@ static void read_turn_result(GameState &S, const GameMap &M,
     }
   }
 
-  for (const auto &[id, target] : submitted.moves) {
+  for (const auto &entry : submitted.moves) {
+    const WarriorId &id = entry.first;
+    const int target = entry.second;
     Building *b = find_building(S, target);
     int cost = (b != nullptr && b->side == M.my_side) ? 0 : MOVE_COST;
     S.gold -= cost;
@@ -333,9 +353,11 @@ static void read_turn_result(GameState &S, const GameMap &M,
         int hq_region = hq_of(M, id.side);
         Building *hq_b = find_building(S, hq_region);
         int hq_level = (hq_b != nullptr) ? hq_b->level : 1;
-        S.warriors.push_back(Warrior{.id = id,
-                                     .region = hq_region,
-                                     .hp = HQ_LEVELS[hq_level].warrior_hp});
+        Warrior trained_warrior;
+        trained_warrior.id = id;
+        trained_warrior.region = hq_region;
+        trained_warrior.hp = HQ_LEVELS[hq_level].warrior_hp;
+        S.warriors.push_back(trained_warrior);
       }
     }
   }
@@ -490,7 +512,9 @@ static std::vector<int> path(const Paths &P, int u, int v) {
 static void emit_command() { std::cout << "COMMAND\n"; }
 
 static void emit_actions(const Actions &a) {
-  for (const auto &[id, target] : a.moves) {
+  for (const auto &entry : a.moves) {
+    const WarriorId &id = entry.first;
+    const int target = entry.second;
     std::cout << "MOVE " << format_warrior(id) << ' ' << target << '\n';
   }
   for (int r : a.upgrades) {
@@ -506,17 +530,609 @@ static void emit_end() { std::cout << "END" << std::endl; }
 //////////////////////////////////
 //// WRITE YOUR STRATEGY HERE ////
 //////////////////////////////////
-static Actions decide(const GameState &S, const GameMap &M, const Paths &P,
-                      int turn) {
-  Actions a;
-  if (turn == 1) {
-    for (const auto &w : S.warriors) {
-      if (w.id.side != M.my_side)
-        continue;
-      a.moves.emplace_back(w.id, M.opp_hq); // move this warrior to the enemy HQ
+
+// AUTO-RL-UPDATE:START
+static const char* kLatestRlSummary = "epochs=600;final_loss=11.861469;eval_match_rate=0.633333";
+// AUTO-RL-UPDATE:END
+
+
+
+
+struct RlSummaryMeta {
+  int epochs = 0;
+  float final_loss = 0.0f;
+  float eval_match_rate = 0.0f;
+  bool valid = false;
+};
+
+RlSummaryMeta parse_rl_summary(const char* raw) {
+  RlSummaryMeta meta;
+  if (raw == nullptr) {
+    return meta;
+  }
+
+  std::string text(raw);
+  std::stringstream stream(text);
+  std::string token;
+  while (std::getline(stream, token, ';')) {
+    const size_t eq = token.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+    const std::string key = token.substr(0, eq);
+    const std::string value = token.substr(eq + 1);
+    if (key == "epochs") {
+      meta.epochs = std::atoi(value.c_str());
+    } else if (key == "final_loss") {
+      meta.final_loss = std::atof(value.c_str());
+    } else if (key == "eval_match_rate") {
+      meta.eval_match_rate = std::atof(value.c_str());
     }
   }
-  return a;
+
+  meta.valid = true;
+  return meta;
+}
+
+const RlSummaryMeta &get_latest_rl_summary() {
+  static const RlSummaryMeta summary = parse_rl_summary(kLatestRlSummary);
+  return summary;
+}
+
+namespace {
+
+constexpr int kRlInputDim = 16;
+constexpr int kRlActionDim = 4;
+
+Model load_rl_model(const char *path) {
+  Model m;
+  const char *file_path = path != nullptr ? path : "models/weights.txt";
+  std::ifstream input(file_path);
+  if (!input.is_open()) {
+    m.weights = {1.0f};
+    m.bias = {0.0f};
+    m.input_dim = 1;
+    m.action_dim = 1;
+    return m;
+  }
+
+  std::vector<float> values;
+  std::string line;
+  std::getline(input, line);
+  std::istringstream iss(line);
+  float value = 0.0f;
+  while (iss >> value) {
+    values.push_back(value);
+  }
+
+  m.input_dim = kRlInputDim;
+  m.action_dim = kRlActionDim;
+  const int weight_count = m.input_dim * m.action_dim;
+  const int bias_count = m.action_dim;
+
+  if (values.size() >= static_cast<size_t>(weight_count + bias_count)) {
+    m.weights.assign(values.begin(), values.begin() + weight_count);
+    m.bias.assign(values.begin() + weight_count,
+                  values.begin() + weight_count + bias_count);
+  } else if (!values.empty()) {
+    m.weights.assign(values.begin(), values.end());
+    m.bias.assign(m.action_dim, 0.0f);
+  } else {
+    m.weights.assign(weight_count, 0.0f);
+    m.bias.assign(bias_count, 0.0f);
+  }
+
+  return m;
+}
+
+std::vector<float> predict_rl_logits(const Model &m,
+                                     const std::vector<float> &input) {
+  std::vector<float> logits(m.action_dim, 0.0f);
+  if (m.weights.empty() || m.action_dim <= 0 || m.input_dim <= 0) {
+    return logits;
+  }
+
+  std::vector<float> normalized_input(input.begin(), input.end());
+  float norm = 0.0f;
+  for (float value : normalized_input) {
+    norm += value * value;
+  }
+  norm = std::sqrt(norm);
+  if (norm > 1e-8f) {
+    for (float &value : normalized_input) {
+      value /= norm;
+    }
+  }
+
+  for (int action = 0; action < m.action_dim; ++action) {
+    float score = 0.0f;
+    const int base = action * m.input_dim;
+    for (int feature = 0; feature < m.input_dim; ++feature) {
+      const int index = base + feature;
+      if (index >= static_cast<int>(m.weights.size())) {
+        break;
+      }
+      const float value = feature < static_cast<int>(normalized_input.size()) ? normalized_input[feature] : 0.0f;
+      score += value * m.weights[index];
+    }
+    if (action < static_cast<int>(m.bias.size())) {
+      score += m.bias[action];
+    }
+    logits[action] = score;
+  }
+  return logits;
+}
+
+float predict_rl(const Model &m, const std::vector<float> &input) {
+  const auto logits = predict_rl_logits(m, input);
+  return logits.empty() ? 0.0f : logits.front();
+}
+
+} // namespace
+
+namespace strategy {
+
+struct AnalyzerOutput {
+  int turn = 0;
+  int gold = 0;
+  int own_warriors = 0;
+  int enemy_warriors = 0;
+  int friendly_buildings = 0;
+  int enemy_buildings = 0;
+  bool opening_turn = false;
+  bool can_train = false;
+  bool can_upgrade = false;
+  bool under_pressure = false;
+  int pressure_score = 0;
+  int my_hq_hp = 0;
+  int enemy_hq_hp = 0;
+};
+
+struct EconomyCandidate {
+  int train_n = 0;
+  std::vector<int> upgrades;
+  std::vector<std::pair<WarriorId, int>> moves;
+  float score = 0.0f;
+  std::string label;
+};
+
+struct AttackCandidate {
+  std::vector<std::pair<WarriorId, int>> moves;
+  float score = 0.0f;
+  std::string label;
+};
+
+struct DefenseCandidate {
+  std::vector<int> upgrades;
+  std::vector<std::pair<WarriorId, int>> moves;
+  float score = 0.0f;
+  std::string label;
+};
+
+struct PlanBundle {
+  EconomyCandidate economy;
+  AttackCandidate attack;
+  DefenseCandidate defense;
+};
+
+class Analyzer {
+public:
+  AnalyzerOutput analyze(const GameState &state, const GameMap &map,
+                         const Paths &, int turn) const {
+    AnalyzerOutput out;
+    out.turn = turn;
+    out.gold = state.gold;
+    out.opening_turn = (turn == 1);
+
+    for (const auto &warrior : state.warriors) {
+      if (warrior.id.side == map.my_side) {
+        ++out.own_warriors;
+      } else {
+        ++out.enemy_warriors;
+      }
+    }
+
+    for (const auto &building : state.buildings) {
+      if (building.side == map.my_side) {
+        ++out.friendly_buildings;
+      } else {
+        ++out.enemy_buildings;
+      }
+    }
+
+    out.can_train = out.gold >= TRAIN_COST;
+    out.can_upgrade = out.gold >= 600 && out.friendly_buildings > 0;
+    out.under_pressure = out.enemy_warriors > out.own_warriors || out.own_warriors <= 2;
+    out.pressure_score = out.enemy_warriors - out.own_warriors;
+    if (out.opening_turn) {
+      out.pressure_score += 2;
+    }
+
+    for (const auto &building : state.buildings) {
+      if (building.side == map.my_side && building.type == BType::HQ) {
+        out.my_hq_hp = building.hp;
+      }
+      if (building.side != map.my_side && building.type == BType::HQ) {
+        out.enemy_hq_hp = building.hp;
+      }
+    }
+    return out;
+  }
+};
+
+class EconomyPlanner {
+public:
+  std::vector<EconomyCandidate> plan(const AnalyzerOutput &summary,
+                                     const GameState &state,
+                                     const GameMap &map) const {
+    std::vector<EconomyCandidate> candidates;
+
+    EconomyCandidate idle;
+    idle.label = "idle";
+    idle.score = 70.0f + static_cast<float>(summary.friendly_buildings) * 2.0f;
+    if (summary.my_hq_hp <= 12) {
+      idle.score -= 12.0f;
+    }
+    candidates.push_back(idle);
+
+    if (summary.can_train && summary.turn > 1) {
+      EconomyCandidate train;
+      train.train_n = 1;
+      train.label = "train";
+      train.score = 60.0f - static_cast<float>(summary.gold) / 1000.0f +
+                    static_cast<float>(summary.turn) * 0.1f;
+      if (summary.under_pressure) {
+        train.score += 8.0f;
+      }
+      if (summary.enemy_hq_hp <= 15) {
+        train.score += 3.0f;
+      }
+      candidates.push_back(train);
+    }
+
+    if (summary.can_train && summary.can_upgrade && summary.turn > 2) {
+      EconomyCandidate train_and_upgrade;
+      train_and_upgrade.train_n = 1;
+      train_and_upgrade.upgrades.push_back(map.my_hq);
+      train_and_upgrade.label = "train_upgrade";
+      train_and_upgrade.score = 55.0f + static_cast<float>(summary.friendly_buildings) * 3.0f;
+      if (summary.my_hq_hp <= 15) {
+        train_and_upgrade.score += 6.0f;
+      }
+      if (summary.own_warriors >= 3) {
+        train_and_upgrade.score += 2.0f;
+      }
+      candidates.push_back(train_and_upgrade);
+    }
+
+    if (summary.can_upgrade) {
+      EconomyCandidate upgrade;
+      upgrade.upgrades.push_back(map.my_hq);
+      upgrade.label = "upgrade";
+      upgrade.score = 45.0f - static_cast<float>(summary.gold) / 2000.0f +
+                      static_cast<float>(summary.friendly_buildings) * 2.5f;
+      if (summary.my_hq_hp <= 12) {
+        upgrade.score += 10.0f;
+      }
+      if (summary.under_pressure) {
+        upgrade.score -= 4.0f;
+      }
+      candidates.push_back(upgrade);
+    }
+
+    if (!state.warriors.empty() && summary.turn > 1) {
+      EconomyCandidate reinforce;
+      reinforce.label = "reinforce";
+      reinforce.moves.emplace_back(state.warriors.front().id, map.my_hq);
+      reinforce.score = 40.0f + static_cast<float>(summary.own_warriors) * 0.5f;
+      candidates.push_back(reinforce);
+    }
+
+    return candidates;
+  }
+};
+
+class AttackPlanner {
+public:
+  std::vector<AttackCandidate> plan(const AnalyzerOutput &summary,
+                                    const GameState &state,
+                                    const GameMap &map,
+                                    const Paths &) const {
+    std::vector<AttackCandidate> candidates;
+
+    AttackCandidate hold;
+    hold.label = "hold";
+    hold.score = 55.0f;
+    if (summary.enemy_hq_hp <= 12) {
+      hold.score += 12.0f;
+    }
+    candidates.push_back(hold);
+
+    if (summary.opening_turn) {
+      AttackCandidate opening_push;
+      opening_push.label = "opening_push";
+      for (const auto &warrior : state.warriors) {
+        if (warrior.id.side != map.my_side)
+          continue;
+        opening_push.moves.emplace_back(warrior.id, map.opp_hq);
+      }
+      opening_push.score = 85.0f + static_cast<float>(summary.own_warriors) * 2.0f;
+      if (summary.enemy_warriors <= 2) {
+        opening_push.score += 8.0f;
+      }
+      candidates.push_back(opening_push);
+    }
+
+    if (!summary.opening_turn && summary.own_warriors >= 2) {
+      AttackCandidate pressure;
+      pressure.label = "pressure";
+      int assigned = 0;
+      for (const auto &warrior : state.warriors) {
+        if (warrior.id.side != map.my_side)
+          continue;
+        if (assigned >= 2)
+          break;
+        pressure.moves.emplace_back(warrior.id, map.opp_hq);
+        ++assigned;
+      }
+      pressure.score = 72.0f + static_cast<float>(summary.own_warriors) * 1.0f;
+      if (summary.under_pressure) {
+        pressure.score += 7.0f;
+      }
+      candidates.push_back(pressure);
+    }
+
+    if (summary.own_warriors >= 3 && summary.enemy_hq_hp > 0) {
+      AttackCandidate multi_pressure;
+      multi_pressure.label = "multi_pressure";
+      int assigned = 0;
+      for (const auto &warrior : state.warriors) {
+        if (warrior.id.side != map.my_side)
+          continue;
+        if (assigned >= 3)
+          break;
+        multi_pressure.moves.emplace_back(warrior.id, map.opp_hq);
+        ++assigned;
+      }
+      multi_pressure.score = 76.0f + static_cast<float>(summary.own_warriors) * 0.8f;
+      if (summary.enemy_warriors >= summary.own_warriors) {
+        multi_pressure.score -= 4.0f;
+      }
+      candidates.push_back(multi_pressure);
+    }
+
+    return candidates;
+  }
+};
+
+class DefensePlanner {
+public:
+  std::vector<DefenseCandidate> plan(const AnalyzerOutput &summary,
+                                     const GameState &state,
+                                     const GameMap &map,
+                                     const Paths &) const {
+    std::vector<DefenseCandidate> candidates;
+
+    DefenseCandidate hold;
+    hold.label = "hold";
+    hold.score = 60.0f;
+    if (summary.my_hq_hp <= 10) {
+      hold.score -= 8.0f;
+    }
+    candidates.push_back(hold);
+
+    if (summary.under_pressure) {
+      DefenseCandidate stabilize;
+      stabilize.label = "stabilize";
+      stabilize.upgrades.push_back(map.my_hq);
+      for (const auto &warrior : state.warriors) {
+        if (warrior.id.side != map.my_side)
+          continue;
+        stabilize.moves.emplace_back(warrior.id, map.my_hq);
+      }
+      stabilize.score = 78.0f - static_cast<float>(summary.pressure_score) * 1.5f;
+      if (summary.my_hq_hp <= 12) {
+        stabilize.score += 10.0f;
+      }
+      candidates.push_back(stabilize);
+    }
+
+    if (summary.enemy_warriors > summary.own_warriors + 1) {
+      DefenseCandidate reinforce_hq;
+      reinforce_hq.label = "reinforce_hq";
+      reinforce_hq.upgrades.push_back(map.my_hq);
+      reinforce_hq.score = 72.0f - static_cast<float>(summary.enemy_warriors - summary.own_warriors) * 2.0f;
+      candidates.push_back(reinforce_hq);
+    }
+
+    return candidates;
+  }
+};
+
+class Judgement {
+public:
+  PlanBundle select(const AnalyzerOutput &summary, const GameState &state,
+                    const GameMap &map, int,
+                    const std::vector<EconomyCandidate> &economies,
+                    const std::vector<AttackCandidate> &attacks,
+                    const std::vector<DefenseCandidate> &defenses) const {
+    PlanBundle best;
+    float best_score = -std::numeric_limits<float>::infinity();
+
+    for (const auto &economy : economies) {
+      for (const auto &attack : attacks) {
+        for (const auto &defense : defenses) {
+          float score = score_combination(summary, state, map, economy, attack, defense);
+          if (score > best_score) {
+            best_score = score;
+            best.economy = economy;
+            best.attack = attack;
+            best.defense = defense;
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+private:
+  mutable Model rl_model_;
+  mutable bool rl_model_loaded_ = false;
+
+  const Model &get_model() const {
+    if (!rl_model_loaded_) {
+      rl_model_ = load_rl_model("models/weights.txt");
+      rl_model_loaded_ = true;
+    }
+    return rl_model_;
+  }
+
+  std::vector<float> build_features(const AnalyzerOutput &summary,
+                                    const EconomyCandidate &economy,
+                                    const AttackCandidate &attack,
+                                    const DefenseCandidate &defense) const {
+    std::vector<float> features;
+    features.reserve(16);
+    features.push_back(static_cast<float>(summary.turn) / 200.0f);
+    features.push_back(std::min(1.0f, static_cast<float>(summary.gold) / 5000.0f));
+    features.push_back(std::min(1.0f, static_cast<float>(summary.own_warriors) / 10.0f));
+    features.push_back(std::min(1.0f, static_cast<float>(summary.enemy_warriors) / 10.0f));
+    features.push_back(economy.train_n > 0 ? 1.0f : 0.0f);
+    features.push_back(std::min(1.0f, static_cast<float>(economy.upgrades.size()) / 2.0f));
+    features.push_back(std::min(1.0f, economy.score / 100.0f));
+    features.push_back(static_cast<float>(attack.moves.size()) / 4.0f);
+    features.push_back(attack.label.find("push") != std::string::npos ? 1.0f : 0.0f);
+    features.push_back(attack.label.find("pressure") != std::string::npos ? 1.0f : 0.0f);
+    features.push_back(std::min(1.0f, static_cast<float>(defense.upgrades.size()) / 2.0f));
+    features.push_back(static_cast<float>(defense.moves.size()) / 4.0f);
+    features.push_back(defense.label.find("stabilize") != std::string::npos ? 1.0f : 0.0f);
+    features.push_back(std::min(1.0f, attack.score / 100.0f));
+    features.push_back(std::min(1.0f, defense.score / 100.0f));
+    features.push_back(std::min(1.0f, economy.score / 100.0f));
+    return features;
+  }
+
+  float score_combination(const AnalyzerOutput &summary,
+                          const GameState &state,
+                          const GameMap &map,
+                          const EconomyCandidate &economy,
+                          const AttackCandidate &attack,
+                          const DefenseCandidate &defense) const {
+    float score = economy.score + attack.score + defense.score;
+    const auto rl_summary = get_latest_rl_summary();
+
+    if (summary.opening_turn && !attack.moves.empty()) {
+      score += 20.0f;
+    }
+    if (summary.under_pressure) {
+      score += 8.0f;
+    }
+    if (economy.train_n > 0 && summary.turn > 1) {
+      score += 6.0f;
+    }
+    if (!defense.upgrades.empty()) {
+      score += 5.0f;
+    }
+    if (!attack.moves.empty() && summary.turn > 1) {
+      score += 3.0f;
+    }
+    if (summary.my_hq_hp <= 12 && !defense.moves.empty()) {
+      score += 7.0f;
+    }
+    if (summary.enemy_hq_hp <= 12 && !attack.moves.empty()) {
+      score += 6.0f;
+    }
+
+    const int friendly_buildings = static_cast<int>(std::count_if(state.buildings.begin(), state.buildings.end(), [&](const Building &b) {
+      return b.side == map.my_side;
+    }));
+    if (friendly_buildings < 2 && economy.train_n > 0) {
+      score += 3.0f;
+    }
+
+    if (rl_summary.valid) {
+      score += std::min(8.0f, rl_summary.eval_match_rate * 6.0f);
+      if (rl_summary.final_loss < 2.0f) {
+        score += 3.0f;
+      }
+      if (rl_summary.epochs >= 100) {
+        score += 1.0f;
+      }
+    }
+
+    const auto features = build_features(summary, economy, attack, defense);
+    const auto logits = predict_rl_logits(get_model(), features);
+    if (!logits.empty()) {
+      const float rl_score = *std::max_element(logits.begin(), logits.end());
+      const float rl_weight = 0.05f + std::min(0.08f, rl_summary.eval_match_rate * 0.04f);
+      score += rl_score * rl_weight;
+    }
+
+    return score;
+  }
+};
+
+class Assembler {
+public:
+  Actions assemble(const AnalyzerOutput &, const PlanBundle &bundle) const {
+    Actions out;
+
+    out.train_n = bundle.economy.train_n;
+    for (int region : bundle.economy.upgrades) {
+      add_unique_upgrade(out, region);
+    }
+    for (int region : bundle.defense.upgrades) {
+      add_unique_upgrade(out, region);
+    }
+
+    for (const auto &move : bundle.attack.moves) {
+      add_unique_move(out, move);
+    }
+    for (const auto &move : bundle.defense.moves) {
+      add_unique_move(out, move);
+    }
+
+    return out;
+  }
+
+private:
+  static void add_unique_upgrade(Actions &out, int region) {
+    if (std::find(out.upgrades.begin(), out.upgrades.end(), region) ==
+        out.upgrades.end()) {
+      out.upgrades.push_back(region);
+    }
+  }
+
+  static void add_unique_move(Actions &out,
+                              const std::pair<WarriorId, int> &move) {
+    for (const auto &existing : out.moves) {
+      if (existing.first == move.first) {
+        return;
+      }
+    }
+    out.moves.push_back(move);
+  }
+};
+
+} // namespace strategy
+
+static Actions decide(const GameState &S, const GameMap &M, const Paths &P,
+                      int turn) {
+  strategy::Analyzer analyzer;
+  strategy::EconomyPlanner economy_planner;
+  strategy::AttackPlanner attack_planner;
+  strategy::DefensePlanner defense_planner;
+  strategy::Judgement judgement;
+  strategy::Assembler assembler;
+
+  const auto summary = analyzer.analyze(S, M, P, turn);
+  const auto economy_candidates = economy_planner.plan(summary, S, M);
+  const auto attack_candidates = attack_planner.plan(summary, S, M, P);
+  const auto defense_candidates = defense_planner.plan(summary, S, M, P);
+  const auto selected = judgement.select(summary, S, M, turn, economy_candidates,
+                                         attack_candidates, defense_candidates);
+  return assembler.assemble(summary, selected);
 }
 
 int main() {
